@@ -1,0 +1,29 @@
+id = "little_big_redstone"
+name = "Little Big Redstone"
+version = "0.2.0"
+description = """A port of Little Big Redstone for Horizon: the red microchip is a block that holds a small
+redstone circuit and drives the redstone on its six faces. This slice carries the chip, its circuit
+board item, the I/O ports (an input compares the signal on its face with at least / exactly / at
+most and passes it, an output emits the configured strength weakly or strongly) and the AND gate
+(2..10 inputs, on when every input is on, passing the greatest). The circuit lives in the block
+entity's saved compound and is evaluated at the end of each level tick, so it survives a save and a
+reload. /lbr circuit <x> <y> <z> and|status|clear is the configuration surface. The other 15
+microchip colours, the other logic components, the circuit-board GUI, the custom model loader and
+the logic-array items are not ported yet."""
+authors = ["Swedz", "AdLf0208"]
+# The original's licence: MIT (Swedz/Little-Big-Redstone); its text and copyright notice travel
+# inside the package as LICENSE / LICENSE-NOTICE.md.
+# The id is the resource namespace and the only identity: Cargo's package name and version are not
+# the mod's.
+api = "0.2"
+# The installation side, not the hook's: the microchip ticks and drives redstone on the server, and
+# single player's integrated server belongs to the client installation, so "both".
+side = "both"
+# The one shared value every manifest carries ("May add blocks, items, mob effects and entity
+# types"): this package really does declare the microchip block, its item and a block entity type.
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

@@ -1,0 +1,19 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "D": "minecraft:polished_deepslate",
+    "Q": "#c:gems/quartz",
+    "R": "#c:dusts/redstone",
+    "d": "#c:gems/diamond"
+  },
+  "pattern": [
+    "DdD",
+    "RQR",
+    "DdD"
+  ],
+  "result": {
+    "count": 1,
+    "id": "little_big_redstone:redstone_circuit_board"
+  }
+}

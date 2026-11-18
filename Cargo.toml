@@ -1,0 +1,19 @@
+[package]
+# Port of Little Big Redstone 1.9.13-1.21.1 (Swedz/Little-Big-Redstone, MIT), Minecraft Java
+# 1.21.1 NeoForge; the port targets Horizon 26.3 at the pin in horizon-mod.toml. Clean-room Rust
+# rewrite from the mod's behaviour (notes.md, FINDINGS.md); local-only until the maintainer
+# approves publishing, publishable under MIT with this source.
+#
+# Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+name = "little_big_redstone"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "Little Big Redstone for Horizon: a microchip block holding an AND gate and its I/O ports"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build). Any other registry dependency must be
+# pinned with `horizon-launcher native-lock .` before building.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

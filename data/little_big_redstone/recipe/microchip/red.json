@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "C": "little_big_redstone:redstone_circuit_board",
+    "D": "#c:dyes/red",
+    "I": "#c:storage_blocks/iron",
+    "R": "#c:dusts/redstone",
+    "i": "#c:ingots/iron"
+  },
+  "pattern": [
+    "iIi",
+    "RCR",
+    "iDi"
+  ],
+  "result": {
+    "count": 1,
+    "id": "little_big_redstone:red_microchip"
+  }
+}
