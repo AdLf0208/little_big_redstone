@@ -1,47 +1,67 @@
-# Little Big Redstone for Horizon
+# Little Big Redstone — a Horizon port
 
-A Horizon port of **Little Big Redstone 1.9.13-1.21.1**
-(`Swedz/Little-Big-Redstone`, MIT) — slice 1: **one microchip with an AND gate**.
+**Little Big Redstone** is a Minecraft mod. Compact your big redstone into a little block!. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
 
-Built for Horizon's **mod API 0.2** (SDK `0b14f8ac`, mixins `e59da9094f0c`) against
-Minecraft 26.3. Version 0.2.0 is the same slice republished as one flat SDK
-package: 0.1.0 was a retired `.hnmod` container (submission PR #902).
+Upstream: [Swedz/Little-Big-Redstone](https://github.com/Swedz/Little-Big-Redstone) — licence **MIT**.
 
-## What it does
+| | |
+|---|---|
+| Upstream mod | Little Big Redstone ([source](https://github.com/Swedz/Little-Big-Redstone)) |
+| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
+| Package | `little_big_redstone.hmod` (install it with the Horizon launcher) |
+| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
 
-Upstream compacts redstone into a microchip block whose circuit board holds
-logic components wired to I/O ports; each port is bound to one face of the block.
-This slice implements the guide's own AND scene:
+## What this port implements
 
-- `little_big_redstone:red_microchip` — the block (six face properties, a block
-  entity holding the circuit, redstone in and out on its faces);
-- the **AND gate** with 2..10 inputs (the jar's truth table: `0,0 → 0`,
-  `0,1 → 0`, `1,0 → 0`, `1,1 → 1`; when every input is on the output is the
-  greatest input);
-- **I/O ports**: input ports compare the signal on their face with their
-  strength (`<=`, `==`, `>=`) and pass it through; output ports emit their
-  configured strength (or pass the signal when the strength is 0), weakly or
-  strongly;
-- the circuit is saved in the block entity's compound, so it survives a reload;
-- `/lbr circuit <x> <y> <z> and <input_a> <input_b> <output>` builds the scene,
-  `… status` reports it and its live signals, `… clear` empties it.
+- **An input port now asks the game.** `LevelRef::signal(host, neighbour, face)` is the engine's own
+- **`block_signal` answers from the registry's power cache**, not from the block entity. The hook is
+- **The face properties are written one by one** (`host.set_block_property`), not as one resolved
+- **`clear` replaces the block entity's data** (`block_entity_replace_data(empty)`): `merge_data`
+- **Commands are typed.** The dispatcher parses `/lbr …` once and hands `run_mod_command` a literal
+- **`<pos:block_pos>` instead of three `<x:integer>`s**, so relative coordinates (`~ ~1 ~`) work.
+- **The client half of `level_tick_post` does nothing**: the hook is asked on both sides (the SDK
 
-## Install
+## Not yet ported
 
-One file: `little_big_redstone.hmod`. It is the code **and** the content in one
-package (`horizon-mod.toml`, `Cargo.toml`, `src/`, `assets/`, `data/`), so the
-microchip block, its item, models, textures, loot, recipes and tags arrive with
-it. Build it with `cargo horizon-mod build`; the game must be built by
-`horizon-launcher native-build` against the same pinned Horizon build.
+- The other 15 microchip colours; the 20 other logic components (NOT, NAND, NOR,
+- The circuit-board GUI, wire routing/rendering, the redstone-face overlay, the
+- The logic-array and floppy-disk items (a saved program travels between
+- A microchip that is not ticking (its chunk unloaded) keeps its last outputs;
+- `setblock` with a state the content declares but the block never wrote leaves
+- No sounds, particles, comparator output, hopper interaction or loot for the
+- **No in-game run in this environment.** The e2e needs a game the launcher built with this package
+- **Grammar-level refusals are the dispatcher's** now (behaviour 5), so the `flip` phase of the e2e
 
-## What it does not do yet
+## Installing
 
-The other 15 microchip colours, the other 20 logic components, the circuit-board
-GUI (replaced by `/lbr`), the wire rendering, the redstone-face overlay, the
-microchip's custom model loader and the logic-array/floppy-disk items. See
-`notes.md`.
+1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
+2. Add `little_big_redstone.hmod` to the instance's mods.
+3. The package is pinned to a specific Horizon build; the launcher checks that pin.
 
-## Licence
+## Licence and credit
 
-MIT. The original is Copyright (c) 2024 Swedz; see `LICENSE` and
-`LICENSE-NOTICE.md`, which travel inside the package.
+Little Big Redstone was created by its upstream authors; the code, models and assets in the original mod
+remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
+rewrite for Horizon, not a translation of the original source.
+
+- `LICENSE` — the upstream licence text.
+- `LICENSE-NOTICE.md` — what this port carries and where it came from.
+- The upstream project: https://github.com/Swedz/Little-Big-Redstone
+
+## Technical details
+
+```
+horizon-mod.toml   package manifest (id, version, api, [native] pin)
+Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
+src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
+assets/ data/      the content the package ships
+tools/             content generators and the e2e scenario
+```
+
+- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
+- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
+- In-game: `ports/tools/launcher-game.sh run little_big_redstone` in the campaign tree, or install the
+  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
+
+This repository is generated from the campaign's port at `ports/little_big_redstone/`; the port's own
+`notes.md` is the full record (decisions, traps, evidence).
