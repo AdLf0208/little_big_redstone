@@ -6,10 +6,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "little_big_redstone"
-version = "0.2.0"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
-description = "Little Big Redstone for Horizon: a microchip block holding an AND gate and its I/O ports"
+description = "Little Big Redstone for Horizon: a microchip block holding a six-gate redstone circuit and its I/O ports"
 publish = false
 
 [dependencies]

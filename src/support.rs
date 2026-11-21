@@ -31,8 +31,8 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    AndConfig, Circuit, Command as Action, CommandError, Comparison, Component, ComponentKind,
-    FACE_COUNT, Face, IoConfig, Live, Port, PowerType, Wire,
+    Circuit, Command as Action, CommandError, Comparison, Component, ComponentKind, FACE_COUNT,
+    Face, Gate, GateKind, IoConfig, Live, Port, PowerType, Wire, check_layout,
 };
 
 /// The one block this slice carries.
@@ -86,13 +86,24 @@ pub fn declare(r: &mut dyn Registrar) {
         .block_entity_type(BLOCK_ENTITY_TYPE)
         .blocks(&["red_microchip"])
         .build();
+    // Two Parts, not one attached twice: the engine refuses the same Part on a block and on
+    // its block entity type ("attached ... twice"), which crashed the world at load in 0.2.0.
     r.block_part(block, Microchip);
-    r.block_entity_part(&kind, Microchip)
-        .expect("the microchip's Part attaches to the type this mod just declared");
+    r.block_entity_part(&kind, MicrochipEntity)
+        .expect("the microchip's block entity Part attaches to the type this mod just declared");
 }
 
-/// The microchip's Part: the block's redstone answers and its block entity's tick.
+/// The microchip block's Part: its redstone answers (the block moments).
 pub struct Microchip;
+
+/// The microchip block entity's Part: the tick (the entity moments). A distinct type because a
+/// Part may be attached only once; `BlockEntityPart` requires a `BlockPart` impl, which answers
+/// no block moment here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MicrochipEntity;
+
+#[mod_api::horizon_part]
+impl BlockPart for MicrochipEntity {}
 
 #[mod_api::horizon_part]
 impl BlockPart for Microchip {
@@ -120,7 +131,7 @@ impl BlockPart for Microchip {
 }
 
 #[mod_api::horizon_part]
-impl BlockEntityPart for Microchip {
+impl BlockEntityPart for MicrochipEntity {
     /// A fresh microchip starts with an empty compound, as the retired bundle's
     /// `native_block_entity` did.
     fn block_entity(
@@ -206,6 +217,19 @@ fn evaluate(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option
     }
     sync_faces(host, level, pos, &live, power_before != power_after);
     Some(live)
+}
+
+/// The readout's evaluation: the same circuit maths as a tick, with no write back.
+/// `/lbr circuit <pos> status` must not change the chip it inspects.
+fn inspect(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<Live> {
+    if !is_microchip_at(host, level, pos) {
+        return None;
+    }
+    let mut circuit = read_circuit(host, level, pos);
+    if circuit.is_empty() {
+        return None;
+    }
+    Some(circuit.evaluate(face_signals(host, level, pos)))
 }
 
 /// Write the six face properties when they changed, and tell the neighbours when a face's emitted
@@ -343,18 +367,32 @@ fn is_microchip_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> bool {
 
 /// Declare the `/lbr` usages this slice implements (`register_commands`, API 8).
 pub fn declare_commands(commands: &mut Vec<Command>) {
-    for root in ROOTS {
-        commands.push(Command::new(&format!("{root} help")));
-        commands.push(Command::new(&format!(
-            "{root} circuit <pos:block_pos> status"
-        )));
-        commands.push(Command::new(&format!(
-            "{root} circuit <pos:block_pos> clear"
-        )));
-        commands.push(Command::new(&format!(
-            "{root} circuit <pos:block_pos> and <input_a:word> <input_b:word> <output:word>"
-        )));
+    for (usage, level) in usages() {
+        commands.push(Command::op(&usage, level));
     }
+}
+
+/// The usages and the level each is registered at. `status` only reads (level 0);
+/// `clear` and `and` replace a chip's wiring at coordinates with no reach or build
+/// check of their own, so they are gamemaster tools (level 2), as `/data` is.
+pub fn usages() -> Vec<(String, u8)> {
+    let mut usages = Vec::new();
+    for root in ROOTS {
+        usages.push((format!("{root} help"), 0));
+        usages.push((format!("{root} circuit <pos:block_pos> status"), 0));
+        usages.push((format!("{root} circuit <pos:block_pos> clear"), 2));
+        usages.push((
+            format!("{root} circuit <pos:block_pos> <gate:word> <faces:text>"),
+            2,
+        ));
+        usages.push((
+            format!(
+                "{root} circuit <pos:block_pos> output <face:word> <strength:integer> <power:word>"
+            ),
+            2,
+        ));
+    }
+    usages
 }
 
 /// Run a `/lbr` line (`run_mod_command`, API 8, which replaces `perform_command`). Upstream edits a
@@ -392,20 +430,14 @@ fn action(literals: &[String], arguments: &[CommandArgument]) -> Result<Action, 
             match literals.get(2).map(String::as_str) {
                 Some("status") => Ok(Action::Status { pos }),
                 Some("clear") => Ok(Action::Clear { pos }),
-                Some("and") => {
-                    let inputs = [
-                        face_argument(arguments, "input_a")?,
-                        face_argument(arguments, "input_b")?,
-                    ];
-                    let output = face_argument(arguments, "output")?;
-                    Ok(Action::Configure {
-                        pos,
-                        inputs,
-                        output,
-                    })
-                }
+                Some("output") => Ok(Action::SetOutput {
+                    pos,
+                    face: face_argument(arguments, "face")?,
+                    strength: strength_argument(arguments)?,
+                    power_type: power_argument(arguments)?,
+                }),
+                None => gate_action(pos, arguments),
                 Some(other) => Err(CommandError::UnknownAction(other.to_owned())),
-                None => Err(CommandError::WrongArity),
             }
         }
         Some(other) => Err(CommandError::UnknownAction((*other).to_owned())),
@@ -435,6 +467,57 @@ fn face_argument(arguments: &[CommandArgument], name: &str) -> Result<Face, Comm
     Face::parse(token).ok_or_else(|| CommandError::UnknownFace(token.clone()))
 }
 
+/// The gate form: a gate word and the face list, whose last face is the output.
+/// The layout's count and duplicate refusals are the runtime's
+/// ([`Circuit::with_gate`]), so the replies are the same as the line parser's.
+fn gate_action(pos: [i32; 3], arguments: &[CommandArgument]) -> Result<Action, CommandError> {
+    let gate = match argument(arguments, "gate") {
+        Some(CommandArgumentValue::String(token)) => {
+            GateKind::parse(token).ok_or_else(|| CommandError::UnknownAction(token.clone()))?
+        }
+        _ => return Err(CommandError::WrongArity),
+    };
+    let Some(CommandArgumentValue::String(text)) = argument(arguments, "faces") else {
+        return Err(CommandError::WrongArity);
+    };
+    let faces = text
+        .split_whitespace()
+        .map(|token| Face::parse(token).ok_or_else(|| CommandError::UnknownFace(token.to_owned())))
+        .collect::<Result<Vec<Face>, CommandError>>()?;
+    if faces.len() < 2 {
+        return Err(CommandError::WrongArity);
+    }
+    let (output, inputs) = faces.split_last().ok_or(CommandError::WrongArity)?;
+    check_layout(gate, inputs, *output)?;
+    Ok(Action::Configure {
+        pos,
+        gate,
+        inputs: inputs.to_vec(),
+        output: *output,
+    })
+}
+
+fn strength_argument(arguments: &[CommandArgument]) -> Result<u8, CommandError> {
+    let Some(CommandArgumentValue::Integer(value)) = argument(arguments, "strength") else {
+        return Err(CommandError::WrongArity);
+    };
+    u8::try_from(*value)
+        .ok()
+        .filter(|strength| *strength <= 15)
+        .ok_or_else(|| CommandError::BadStrength(value.to_string()))
+}
+
+fn power_argument(arguments: &[CommandArgument]) -> Result<PowerType, CommandError> {
+    let Some(CommandArgumentValue::String(token)) = argument(arguments, "power") else {
+        return Err(CommandError::WrongArity);
+    };
+    match token.as_str() {
+        "weak" => Ok(PowerType::Weak),
+        "strong" => Ok(PowerType::Strong),
+        other => Err(CommandError::UnknownPowerType(other.to_owned())),
+    }
+}
+
 /// Run one action and answer through the command's feedback.
 fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::DimensionKey) {
     let Some(level) = dimension.id(host).and_then(|name| host.level(&name)) else {
@@ -445,8 +528,10 @@ fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::Dimens
         Action::Unknown => {}
         Action::Help => {
             for line in [
-                "/lbr circuit <x> <y> <z> and <input_a> <input_b> <output>",
-                "  Build an AND gate with two input ports and one output port.",
+                "/lbr circuit <x> <y> <z> <gate> <input...> <output>",
+                "  Build a gate: and, or, xor, nand, nor (2..10 inputs) or not (1).",
+                "/lbr circuit <x> <y> <z> output <face> <strength> <weak|strong>",
+                "  Retarget the output port; strength 0 passes the gate's value through.",
                 "/lbr circuit <x> <y> <z> status",
                 "  Report the microchip's circuit and its last live signals.",
                 "/lbr circuit <x> <y> <z> clear",
@@ -457,6 +542,7 @@ fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::Dimens
         }
         Action::Configure {
             pos,
+            gate,
             inputs,
             output,
         } => {
@@ -467,7 +553,7 @@ fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::Dimens
                 );
                 return;
             }
-            let circuit = match Circuit::with_and_gate(inputs[0], inputs[1], output) {
+            let circuit = match Circuit::with_gate(gate, &inputs, output) {
                 Ok(circuit) => circuit,
                 Err(error) => {
                     say(host, format!("lbr: {error}"));
@@ -478,14 +564,62 @@ fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::Dimens
             say(
                 host,
                 format!(
-                    "lbr: AND gate at {} {} {}: inputs {} and {}, output {}",
+                    "lbr: {} gate at {} {} {}: {}, output {}",
+                    gate.label(),
                     pos[0],
                     pos[1],
                     pos[2],
-                    inputs[0].name(),
-                    inputs[1].name(),
+                    inputs_phrase(&inputs),
                     output.name()
                 ),
+            );
+            report_live(host, pos, &live);
+        }
+        Action::SetOutput {
+            pos,
+            face,
+            strength,
+            power_type,
+        } => {
+            if !is_microchip_at(host, level, pos) {
+                say(
+                    host,
+                    format!("lbr: no microchip at {} {} {}", pos[0], pos[1], pos[2]),
+                );
+                return;
+            }
+            let mut circuit = read_circuit(host, level, pos);
+            if circuit.is_empty() {
+                say(
+                    host,
+                    format!(
+                        "lbr: the microchip at {} {} {} has no circuit",
+                        pos[0], pos[1], pos[2]
+                    ),
+                );
+                return;
+            }
+            if let Err(error) = circuit.set_output_port(face, strength, power_type) {
+                say(host, format!("lbr: {error}"));
+                return;
+            }
+            let live = write_circuit(host, level, pos, &circuit);
+            say(
+                host,
+                if strength == 0 {
+                    format!(
+                        "lbr: the output port on {} passes its input through ({})",
+                        face.name(),
+                        power_name(power_type)
+                    )
+                } else {
+                    format!(
+                        "lbr: the output port on {} emits {} ({})",
+                        face.name(),
+                        strength,
+                        power_name(power_type)
+                    )
+                },
             );
             report_live(host, pos, &live);
         }
@@ -511,7 +645,9 @@ fn perform(host: &mut dyn ServerHost, action: Action, dimension: mod_api::Dimens
             for line in describe(&circuit) {
                 say(host, line);
             }
-            let live = evaluate(host, level, pos).unwrap_or_else(Live::dark);
+            // A readout must not write: `inspect` runs the same circuit maths
+            // without storing the evaluated circuit or touching the faces.
+            let live = inspect(host, level, pos).unwrap_or_else(Live::dark);
             report_live(host, pos, &live);
         }
         Action::Clear { pos } => {
@@ -562,6 +698,20 @@ fn say(host: &mut dyn ServerHost, line: String) {
     let _ = host.commands().feedback(Text::literal(line));
 }
 
+/// "input north", "inputs north and south", "inputs north, south and west".
+fn inputs_phrase(inputs: &[Face]) -> String {
+    let names: Vec<&str> = inputs.iter().map(|face| face.name()).collect();
+    match names.as_slice() {
+        [] => "no inputs".to_owned(),
+        [one] => format!("input {one}"),
+        [first, second] => format!("inputs {first} and {second}"),
+        _ => {
+            let (last, rest) = names.split_last().expect("a non-empty list");
+            format!("inputs {} and {last}", rest.join(", "))
+        }
+    }
+}
+
 fn report_live(host: &mut dyn ServerHost, pos: [i32; 3], live: &Live) {
     let mut parts = Vec::new();
     for face in Face::ALL {
@@ -604,9 +754,13 @@ fn describe(circuit: &Circuit) -> Vec<String> {
                 power_name(config.power_type),
                 component.output
             ),
-            ComponentKind::And(config) => format!(
-                "lbr: slot {}: AND gate with {} inputs, output {}",
-                component.slot, config.inputs, component.output
+            ComponentKind::Gate(gate) => format!(
+                "lbr: slot {}: {} gate with {} input{}, output {}",
+                component.slot,
+                gate.kind.label(),
+                gate.inputs,
+                if gate.inputs == 1 { "" } else { "s" },
+                component.output
             ),
         });
     }
@@ -740,9 +894,13 @@ fn circuit_compound(circuit: &Circuit, live: &Live) -> Compound {
                     Tag::String(power_code(io.power_type).into()),
                 );
             }
-            ComponentKind::And(and) => {
-                entry.insert("type".into(), Tag::String("and_gate".into()));
-                config.insert("input_count".into(), Tag::Int(i32::from(and.inputs)));
+            ComponentKind::Gate(gate) => {
+                entry.insert("type".into(), Tag::String(gate.kind.type_name().into()));
+                // A NOT gate has no config upstream (`NOTGate`'s codec is colour and
+                // output only); the multi-input gates save their port count.
+                if gate.kind != GateKind::Not {
+                    config.insert("input_count".into(), Tag::Int(i32::from(gate.inputs)));
+                }
             }
         }
         entry.insert("config".into(), Tag::Compound(config));
@@ -866,15 +1024,23 @@ fn component_from_nbt(entry: &Compound) -> Option<Component> {
                 power_type,
             })
         }
-        Tag::String(kind) if kind.to_string_lossy() == "and_gate" => {
-            let inputs = match field(entry, "config") {
-                Some(Tag::Compound(config)) => match field(config, "input_count") {
-                    Some(Tag::Int(inputs)) => u8::try_from((*inputs).clamp(0, 255)).unwrap_or(2),
-                    _ => AndConfig::MIN_INPUTS,
-                },
-                _ => AndConfig::MIN_INPUTS,
+        Tag::String(kind) => {
+            let names = kind.to_string_lossy();
+            let gate_kind = GateKind::from_type(names.as_str())?;
+            let inputs = if gate_kind == GateKind::Not {
+                1
+            } else {
+                match field(entry, "config") {
+                    Some(Tag::Compound(config)) => match field(config, "input_count") {
+                        Some(Tag::Int(inputs)) => {
+                            u8::try_from((*inputs).clamp(0, 255)).unwrap_or(GateKind::MIN_INPUTS)
+                        }
+                        _ => GateKind::MIN_INPUTS,
+                    },
+                    _ => GateKind::MIN_INPUTS,
+                }
             };
-            ComponentKind::And(AndConfig::new(inputs))
+            ComponentKind::Gate(Gate::new(gate_kind, inputs))
         }
         _ => return None,
     };
@@ -911,7 +1077,8 @@ mod tests {
     use super::*;
 
     fn io_circuit() -> Circuit {
-        Circuit::with_and_gate(Face::North, Face::South, Face::East).expect("distinct faces")
+        Circuit::with_gate(GateKind::And, &[Face::North, Face::South], Face::East)
+            .expect("distinct faces")
     }
 
     fn live_with(power: [u8; FACE_COUNT]) -> Live {
@@ -936,6 +1103,98 @@ mod tests {
             read.power(),
             circuit.power(),
             "the power cache is rebuilt from the components"
+        );
+    }
+
+    /// Every gate's own type name and port count survive a save and a reload, so
+    /// a later slice reads the board 0.2.2 wrote.
+    #[test]
+    fn every_gate_round_trips_through_the_saved_compound() {
+        for kind in GateKind::ALL {
+            let inputs: &[Face] = if kind == GateKind::Not {
+                &[Face::North]
+            } else {
+                &[Face::North, Face::South, Face::West]
+            };
+            let mut circuit = Circuit::with_gate(kind, inputs, Face::East).expect("distinct faces");
+            let live = circuit.evaluate({
+                let mut signals = [0u8; FACE_COUNT];
+                signals[Face::North.index()] = 15;
+                signals
+            });
+            let compound = circuit_compound(&circuit, &live);
+            let read = circuit_from_nbt(&compound);
+            assert_eq!(read, circuit, "{} survives a save", kind.name());
+            assert!(
+                read.components().iter().any(|component| matches!(
+                    component.kind,
+                    ComponentKind::Gate(gate) if gate.kind == kind
+                )),
+                "{} keeps its kind",
+                kind.name()
+            );
+        }
+    }
+
+    /// A NOT gate saves its type and no `input_count`, as `NOTGate`'s codec does.
+    #[test]
+    fn a_not_gate_saves_no_input_count() {
+        let circuit =
+            Circuit::with_gate(GateKind::Not, &[Face::North], Face::East).expect("distinct faces");
+        let compound = circuit_compound(&circuit, &Live::dark());
+        let Some(Tag::List(entries)) = field(&compound, "components") else {
+            panic!("the compound has a component list");
+        };
+        let gate = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                Tag::Compound(entry) => Some(entry),
+                _ => None,
+            })
+            .find(|entry| {
+                matches!(field(entry, "type"), Some(Tag::String(kind)) if kind.to_string_lossy() == "not_gate")
+            })
+            .expect("the NOT gate is saved");
+        let Some(Tag::Compound(config)) = field(gate, "config") else {
+            panic!("the NOT gate still carries an (empty) config compound");
+        };
+        assert_eq!(
+            field(config, "input_count"),
+            None,
+            "upstream's NOTGate has no input count"
+        );
+    }
+
+    /// The readout names the gate, its input count and its last output.
+    #[test]
+    fn the_readout_names_each_gate() {
+        let circuit = Circuit::with_gate(
+            GateKind::Xor,
+            &[Face::North, Face::South, Face::West, Face::Up],
+            Face::East,
+        )
+        .expect("distinct faces");
+        let lines = describe(&circuit);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "lbr: slot 4: XOR gate with 4 inputs, output 0"),
+            "{lines:?}"
+        );
+        let not =
+            Circuit::with_gate(GateKind::Not, &[Face::North], Face::East).expect("distinct faces");
+        assert!(
+            describe(&not)
+                .iter()
+                .any(|line| line == "lbr: slot 1: NOT gate with 1 input, output 0"),
+            "a single-input gate reads 'input', not 'inputs'"
+        );
+        let and = io_circuit();
+        assert!(
+            describe(&and)
+                .iter()
+                .any(|line| line == "lbr: slot 2: AND gate with 2 inputs, output 0"),
+            "the AND readout 0.2.0 shipped is unchanged"
         );
     }
 
@@ -1038,24 +1297,115 @@ mod tests {
     }
 
     /// The typed invocation the dispatcher hands `run_mod_command` for
-    /// `/lbr circuit 0 64 0 and north south east`.
+    /// `/lbr circuit 0 64 0 and north south east`: the gate is a word and the
+    /// faces one greedy text, whose last face is the output.
     #[test]
     fn the_typed_arguments_become_the_slice_circuit() {
         assert_eq!(
             action(
-                &words(&["lbr", "circuit", "and"]),
+                &words(&["lbr", "circuit"]),
                 &[
                     argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
-                    argument("input_a", CommandArgumentValue::String("north".to_owned())),
-                    argument("input_b", CommandArgumentValue::String("south".to_owned())),
-                    argument("output", CommandArgumentValue::String("east".to_owned())),
+                    argument("gate", CommandArgumentValue::String("and".to_owned())),
+                    argument(
+                        "faces",
+                        CommandArgumentValue::String("north south east".to_owned())
+                    ),
                 ],
             ),
             Ok(Action::Configure {
                 pos: [0, 64, 0],
-                inputs: [Face::North, Face::South],
+                gate: GateKind::And,
+                inputs: vec![Face::North, Face::South],
                 output: Face::East,
             })
+        );
+    }
+
+    /// Every gate word reaches the runtime, with as many inputs as the player
+    /// typed.
+    #[test]
+    fn the_typed_gate_word_becomes_its_gate() {
+        for (word, kind) in [
+            ("and", GateKind::And),
+            ("or", GateKind::Or),
+            ("xor", GateKind::Xor),
+            ("nand", GateKind::Nand),
+            ("nor", GateKind::Nor),
+        ] {
+            assert_eq!(
+                action(
+                    &words(&["lbr", "circuit"]),
+                    &[
+                        argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                        argument("gate", CommandArgumentValue::String(word.to_owned())),
+                        argument(
+                            "faces",
+                            CommandArgumentValue::String("north south west up east".to_owned())
+                        ),
+                    ],
+                ),
+                Ok(Action::Configure {
+                    pos: [0, 64, 0],
+                    gate: kind,
+                    inputs: vec![Face::North, Face::South, Face::West, Face::Up],
+                    output: Face::East,
+                }),
+                "{word}"
+            );
+        }
+        assert_eq!(
+            action(
+                &words(&["lbr", "circuit"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("gate", CommandArgumentValue::String("not".to_owned())),
+                    argument(
+                        "faces",
+                        CommandArgumentValue::String("north east".to_owned())
+                    ),
+                ],
+            ),
+            Ok(Action::Configure {
+                pos: [0, 64, 0],
+                gate: GateKind::Not,
+                inputs: vec![Face::North],
+                output: Face::East,
+            })
+        );
+    }
+
+    /// `/lbr circuit <pos> output <face> <strength> <weak|strong>`.
+    #[test]
+    fn the_typed_output_command_retargets_the_port() {
+        assert_eq!(
+            action(
+                &words(&["lbr", "circuit", "output"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("face", CommandArgumentValue::String("east".to_owned())),
+                    argument("strength", CommandArgumentValue::Integer(0)),
+                    argument("power", CommandArgumentValue::String("strong".to_owned())),
+                ],
+            ),
+            Ok(Action::SetOutput {
+                pos: [0, 64, 0],
+                face: Face::East,
+                strength: 0,
+                power_type: PowerType::Strong,
+            })
+        );
+        assert_eq!(
+            action(
+                &words(&["lbr", "circuit", "output"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("face", CommandArgumentValue::String("east".to_owned())),
+                    argument("strength", CommandArgumentValue::Integer(16)),
+                    argument("power", CommandArgumentValue::String("weak".to_owned())),
+                ],
+            ),
+            Err(CommandError::BadStrength("16".to_owned()))
         );
     }
 
@@ -1071,25 +1421,59 @@ mod tests {
     fn the_typed_arguments_refuse_what_the_line_parser_refused() {
         assert_eq!(
             action(
-                &words(&["lbr", "circuit", "and"]),
+                &words(&["lbr", "circuit"]),
                 &[
                     argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
-                    argument("input_a", CommandArgumentValue::String("north".to_owned())),
+                    argument("gate", CommandArgumentValue::String("and".to_owned())),
                     argument(
-                        "input_b",
-                        CommandArgumentValue::String("sideways".to_owned())
+                        "faces",
+                        CommandArgumentValue::String("north sideways east".to_owned())
                     ),
-                    argument("output", CommandArgumentValue::String("east".to_owned())),
                 ],
             ),
             Err(CommandError::UnknownFace("sideways".to_owned()))
         );
         assert_eq!(
             action(
-                &words(&["lbr", "circuit", "flip"]),
-                &[argument("pos", CommandArgumentValue::BlockPos([0, 64, 0]))],
+                &words(&["lbr", "circuit"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("gate", CommandArgumentValue::String("flip".to_owned())),
+                    argument(
+                        "faces",
+                        CommandArgumentValue::String("north south east".to_owned())
+                    ),
+                ],
             ),
             Err(CommandError::UnknownAction("flip".to_owned()))
+        );
+        assert_eq!(
+            action(
+                &words(&["lbr", "circuit"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("gate", CommandArgumentValue::String("not".to_owned())),
+                    argument(
+                        "faces",
+                        CommandArgumentValue::String("north south east".to_owned())
+                    ),
+                ],
+            ),
+            Err(CommandError::WrongInputCount {
+                gate: GateKind::Not,
+                got: 2,
+            })
+        );
+        assert_eq!(
+            action(
+                &words(&["lbr", "circuit"]),
+                &[
+                    argument("pos", CommandArgumentValue::BlockPos([0, 64, 0])),
+                    argument("gate", CommandArgumentValue::String("or".to_owned())),
+                    argument("faces", CommandArgumentValue::String("north".to_owned())),
+                ],
+            ),
+            Err(CommandError::WrongArity)
         );
         assert_eq!(
             action(&words(&["lbr", "circuit", "status"]), &[]),
@@ -1112,5 +1496,37 @@ mod tests {
         compound.insert(CIRCUIT_TAG.into(), Tag::Int(7));
         assert_eq!(field(&compound, CIRCUIT_TAG), Some(&Tag::Int(7)));
         assert_eq!(field(&compound, "nothing"), None);
+    }
+
+    #[test]
+    fn only_the_mutating_usages_are_operator_gated() {
+        let usages = usages();
+        assert!(!usages.is_empty());
+        for (usage, level) in &usages {
+            let expected = if usage.contains(" status") || usage.ends_with(" help") {
+                0
+            } else {
+                2
+            };
+            assert_eq!(*level, expected, "{usage}");
+        }
+        assert!(
+            usages
+                .iter()
+                .any(|(usage, level)| usage.contains(" clear") && *level == 2),
+            "clear rewrites wiring at coordinates: it must be level 2"
+        );
+        assert!(
+            usages
+                .iter()
+                .any(|(usage, level)| usage.contains("<gate:word>") && *level == 2),
+            "a gate rewrites wiring at coordinates: it must be level 2"
+        );
+        assert!(
+            usages
+                .iter()
+                .any(|(usage, level)| usage.contains("output <face:word>") && *level == 2),
+            "retargeting the output port rewrites wiring: it must be level 2"
+        );
     }
 }

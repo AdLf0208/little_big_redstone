@@ -81,6 +81,23 @@ volume, not new behaviour (gaps below).
 | `world_lifecycle` (v1, API 44) | `world.rs` | Drops the registered positions when a world opens or closes. |
 | `content_root` (target, AE2 pattern) | `embedded_content.rs` | Writes the embedded `.hmod` to `.horizon-cache/` and appends it to the dev list. |
 
+## Review fixes (2026-11-18) — registry review #1227
+
+| Finding | Fix | Test / proof |
+|---|---|---|
+| `src/support.rs:351` — `clear` and `and` replace any loaded chip's wiring without reach or build permission, and `status` (line 514) evaluated with writes | `clear`/`and` are registered with `Command::op(usage, 2)`; `status` runs `inspect`, the same circuit maths with no stored circuit, no face write and no neighbour update | `support::tests::only_the_mutating_usages_are_operator_gated`; the e2e compares `data get block` before and after `status` |
+
+**Found while proving the leg:** the same `Microchip` Part was attached to the block *and* to its
+block entity type; the engine refuses that ("attached … twice") and the world crashed at load.
+It is now two Parts (`Microchip` for the block moments, `MicrochipEntity` for the tick).
+**Ladder:** 31 tests, clippy `-D warnings` 0, `fmt --check` clean, two builds byte-identical,
+`check` and `fits` exit 0; `launcher-game.sh run little_big_redstone` → `PASS` + `EXIT:0`
+(including "status left the chip's saved data unchanged"), `GAME=$CONTROL_GAME` → `EXIT:1`
+(`../_shared/evidence/little_big_redstone-e2e/`).
+
+Package 0.2.1: **49,444 B**, SHA-256 `70214068c2bb7df78a0a59a0e95be642611552bef4d06f3bde3e20284857ea22`;
+a second build is byte-identical (`cmp`), `check` and `fits` exit 0.
+
 ## Verification (0.1.0, retired `.hnmod` format — historical)
 
 The numbers below are the retired container's, kept as the record of the slice's
@@ -190,10 +207,11 @@ slice builds, and no upstream report is warranted for it.
 
 ## Gaps
 
-- The other 15 microchip colours; the 20 other logic components (NOT, NAND, NOR,
-  XOR, OR, latch, pulse throttler, sequencer, selector, randomizer, comparator,
-  calculator, reader, battery, tag, debugger); the AND gate's 3..10-input
-  configurations are modelled and tested but the command builds the 2-input one.
+- The other 15 microchip colours; the logic components beyond the six gates
+  (RS-NOR latch, T flip-flop, pulse throttler, sequencer, selector, randomizer,
+  comparator, calculator, reader, battery, tag, debugger). **Closed by slice 2:**
+  AND, OR, XOR, NAND, NOR and NOT are all ported, and the command takes 1..=5
+  input faces (the component itself 2..=10 — see slice 2's deviation 2).
 - The circuit-board GUI, wire routing/rendering, the redstone-face overlay, the
   microchip's custom model loader, the six-way rotation tool.
 - The logic-array and floppy-disk items (a saved program travels between
@@ -378,8 +396,9 @@ staged tree for an SDK package.
 3. **The power cache's one-tick window on a level switch** (behaviour 2).
 4. **`runtime::parse_command` is unused by the glue.** It stays public and tested because
    `runtime.rs` must stay byte-identical; the typed path reproduces its decisions.
-5. The 0.1.0 slice gaps above are unchanged: 15 colours, 20 components, the board GUI, wire
-   rendering, the face overlay, the custom model loader, the logic-array items.
+5. The 0.1.0 slice gaps above are unchanged **except the gates**: 0.2.2 ported the other five
+   (OR, XOR, NAND, NOR, NOT), so 15 colours, 14 components, the board GUI, wire rendering, the face
+   overlay, the custom model loader and the logic-array items remain.
 
 ### Changelog (0.2.0 — supersedes #902)
 
@@ -397,5 +416,152 @@ staged tree for an SDK package.
 > (the grammar is the dispatcher's, the replies are the same). Same feature set and the same gaps
 > (15 colours, 20 components, board GUI, wire rendering, face overlay, custom model loader,
 > logic-array items). No 0.2.0 in-game run: the launcher is not installed here.
+
+## Slice 2 — the six-gate logic family (0.2.2, 2026-11-21)
+
+### The gap this slice closes
+
+`notes.md` → *Gaps* (0.1.0, still open after 0.2.1): *"the 20 other logic
+components (NOT, NAND, NOR, XOR, OR, latch, …)"*. The AND gate is the only gate the
+port ships; the jar's gate library is **six** components — AND, OR, XOR, NAND, NOR,
+NOT — and the other five are the same deep-tier mechanism (a component with ports,
+a truth table and per-component state), not new content or UI.
+
+### What this slice is
+
+| in | what |
+|---|---|
+| OR gate | 2..=10 inputs (clamped), **analog**: the greatest input (`ORGate.processInputs`) |
+| XOR gate | 2..=10 inputs, **analog parity**: the greatest input when an odd number are on, else 0 (`XORGate`) |
+| NOT gate | 1 input, **boolean**: `in == 0 ? 1 : 0` (`NOTGate`) |
+| NAND gate | 2..=10 inputs, **boolean**: 1 when any input is 0, else 0 (`NANDGate`) |
+| NOR gate | 2..=10 inputs, **boolean**: 0 when any input is on, else 1 (`NORGate`) |
+| `/lbr circuit <pos> <gate> <faces…>` | the gate is a word (and/or/xor/nand/nor/not); the faces are the inputs and the last one the output, 1..=5 inputs (each port owns a face) |
+| `/lbr circuit <pos> output <face> <strength> <weak\|strong>` | retarget the output port, so its **pass-through** (`strength = 0`) exposes the gate's own analog value — this is what makes the analog rule provable in game |
+| the saved compound | each gate's own `type` (`and_gate`, `or_gate`, `xor_gate`, `nand_gate`, `nor_gate`, `not_gate`) and its `input_count`, as upstream's codec stores them |
+
+**Why this and not more:** the other 15 components (latch, sequencer, selector,
+randomizer, comparator, calculator, reader, battery, tag, debugger, …) are separate
+families with their own state machines; the six gates are one family with one
+shared configuration (`MultiLogicGateConfig`, 2..=10 inputs) and the guide's own
+truth tables. The 15 colours, the board GUI and the logic-array items stay gaps.
+
+### TDD order
+
+1. the five new truth tables and the input-count rules as unit tests, red first;
+2. the runtime (`GateKind`, `Gate`, `evaluate_gate`, `Circuit::with_gate`,
+   `Circuit::set_output_port`, the command grammar), then the glue;
+3. the in-game assertions per gate — truth table, multi-input parity, and the
+   analog value read from a redstone wire when the output port passes through;
+4. the coverage rows below.
+
+### Measured (2026-11-21, pin `0a875da`)
+
+The campaign pin moved from `0b14f8a` to **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly
+2026-11-20, mixins `e59da909…` unchanged, package format 6, content API 0.2) while this slice was in
+flight; the manifest, the cached SDK and the launcher's `SDK_PIN` all name the new pin, so the slice is
+built and proven on it. `runtime.rs` did not gain a single `mod_api` type, so nothing in the three
+breaking hooks of that nightly (`attack_entity`, `entity_interact`, `hanging_break`) applies.
+
+**Red first** (`../_shared/evidence/little_big_redstone/sdk-test-red.log`; the five new gate rules
+were `todo!()` after the tests were written):
+
+```
+test runtime::tests::or_gate_truth_table_and_analog_rule_match_the_guide ... FAILED
+...
+thread 'runtime::tests::or_gate_truth_table_and_analog_rule_match_the_guide' (22307) panicked at src/runtime.rs:737:18:
+not yet implemented: the or gate's output rule
+...
+test result: FAILED. 42 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+The eight are the five gates, the pass-through-output test, the codec round trip and the typed
+command refusal — every one an assertion about this slice, none a compile error.
+
+| Step | Command (all through `ports/tools/build-slot.sh`, `CARGO_INCREMENTAL=0`) | Result |
+|---|---|---|
+| tests | `cargo test --offline` | **50 passed** (33 `runtime::` + 17 `support::`; 31 of them pre-existed), 0 failed — `sdk-test.log` |
+| lints | `cargo clippy --all-targets -- -D warnings` | exit 0, **0 warnings** — `sdk-clippy.log` |
+| format | `cargo fmt --check` | clean — `sdk-fmt.log` |
+| package | `rm -f Cargo.lock && cargo horizon-mod build` (twice, `BUILD_LOCAL=1`: the far box has no `cargo-horizon-mod`) | **57,072 B**, sha256 `481bec30…8cb8`, `cmp`-identical both times — `sdk-build.log`, `sdk-build-second.log`, `sdk-reproducible.txt` |
+| check | `cargo horizon-mod check little_big_redstone.hmod` | `little_big_redstone 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` / `57072 bytes, SHA-256 481bec30…`, **exit 0** — `sdk-check.log`, `sdk-check-json.log` |
+| fits, the pin | `cargo horizon-mod fits … --build 0a875da` | `0a875da  made for`, exit 0 — `sdk-fits.log` |
+| fits, a different build | `cargo horizon-mod fits … --build 0b14f8a` | `0b14f8a  fits`, exit 0 — `sdk-fits-older.log` |
+| gate | `verify-sdk-package.py little_big_redstone` | **1/1** |
+| in-game | `launcher-game.sh build` + `build-slot.sh run --step e2e -- tools/e2e.sh` | `PASS` + `EXIT:0` — `../_shared/evidence/little_big_redstone-e2e/e2e-launcher.log` |
+| counterfactual, lamp | `SELFTEST=1` | `FAIL: expected the lamp at 1,64,0 lit=true, got '…lit=false'` + `EXIT:1` — `e2e-launcher-selftest.log` |
+| counterfactual, gates | `SELFTEST=gates` | `FAIL: expected the output wire at 1,64,0 to carry power=0, got '…power=1'` + `EXIT:1` — `e2e-launcher-gates-selftest.log` |
+| control | `GAME=$CONTROL_GAME` (the same Nightly without the package) | `FAIL: the microchip did not place` + `EXIT:1` — `e2e-launcher-control.log` |
+| log gate | `check-e2e-logs.py little_big_redstone-e2e --strict` | exit 0, **6/6 ok** |
+| what it uses | `unzip -p … uses.json` | **309 entries** (`made_for = 0a875da…`; 8 prefixes: hooks, methods, handles, traits, types, macros, parts, the `registries` capability) — `sdk-uses.json` |
+| entries | `unzip -l little_big_redstone.hmod` | **37** (5 root files, 19 assets, 14 data, 3 `src/`, `uses.json`), **no `Cargo.lock`** — `sdk-entries.log` |
+
+### What the in-game leg proves (each assertion can fail)
+
+The lamp shows ON/OFF only, so the gate phases replace it with a **redstone wire** at the output face
+and set the output port to **pass its input through** (`/lbr … output east 0 weak`); the wire then
+carries the gate's own value, not the port's fixed 15. Every line below is in the log with its `ctl`
+reply:
+
+| gate | assertion (read value) |
+|---|---|
+| NOT | off → wire `power=1` **and saved `microchip.power[5]=1`** (boolean: exactly 1, not 15); 15 in → `power=0` |
+| OR | `0,0` → 0; `0,1` / `1,0` / `1,1` → 15; analog north 3 + south 5 → **5** and saved power **5** |
+| XOR | `0,0` → 0; `0,1` / `1,0` → 15; `1,1` → 0 (the row that separates it from OR) |
+| XOR, 4 inputs | 2 on → 0; 4 on → 0; 3 on → 15; 2 on → 0; 1 on → 15 (odd parity) |
+| NAND | `0,0` → 1; `15,0` → **1** (boolean, not 15); `15,15` → 0 |
+| NOR | `0,0` → **1**; any input on → 0 |
+| status | `slot 2: OR gate with 2 inputs`; each refusal (`a not gate takes exactly 1 input, not 2`, `an and gate takes 2 to 10 inputs, not 1`, `16 is not a signal strength (0 to 15)`, `there is no output port on west`, `flip is not an action`) leaves the OR circuit in place |
+
+The gate counterfactual is `SELFTEST=gates`: the NOT phase asserts the ON output is dark and the run
+fails (`EXIT:1`), so the gate assertions are not vacuous. The AND/recipe/state assertions of 0.2.1 are
+unchanged and still in the same run.
+
+### Coverage — every family the package ships
+
+| family (jar) | state |
+|---|---|
+| microchip block, item, 64 face states, loot, both recipes, `c:` tags | **tested** — `e2e-launcher.log` (states, give, drop, `craft_check.py`) |
+| I/O port, input compare/pass, output strength and weak/strong | **tested** — truth-table phases + `output east 0 weak`, saved power |
+| AND, NAND, OR, XOR, NOR, NOT | **tested** — the table above (truth tables, analog, parity, boolean) |
+| the other 14 components (RS-NOR latch, T flip-flop, pulse throttler, sequencer, selector, randomizer, comparator, calculator, reader, battery, tag, debugger, …) | **not ported** — each is its own state machine; the next slices |
+| the other 15 microchip colours | **not ported** — data carry (15 blocks); no behaviour |
+| circuit-board GUI, wire routing/rendering, face overlay, custom model loader, rotation tool | **not ported** — client/UI half; `/lbr` is the surface |
+| logic-array and floppy-disk items, sticky notes, note board, dye/copy/seal/clear recipes, guide book, EMI pages, redstone bit | **not ported** — items/content, no new behaviour |
+| comparator output, hopper interaction, component drops/sounds/particles | **not ported** — upstream drops components from the block entity |
+| an input port's strong power through a solid cube | **blocked(API)** — `LevelRef::signal` is the weak answer plus the engine's own direct read; a mod's `getDirectSignalTo` chain is the engine's, not per-face |
+
+### Deviations this slice adds
+
+1. **The output port is retargetable, the input ports are not.** `/lbr … output <face> <strength>
+   <weak|strong>` exists because the gate's analog value is otherwise invisible behind a fixed
+   15-strength port; input ports keep their defaults (north, `>= 1`, weak). Upstream configures both
+   in its GUI.
+2. **The command can wire at most five inputs.** Each port owns one of the six faces and one is the
+   output, so a `/lbr` gate takes 1..=5 inputs where the component itself takes 2..=10 (the model and
+   its tests cover 2..=10). A ten-input gate needs the board GUI's free ports.
+3. **A gate whose input count disagrees with its port count is dark** (0) rather than reading past the
+   end of the array; upstream always calls `processInputs` with the configured count, so the case
+   cannot arise there.
+
+### Traps new to this slice
+
+1. **`horizon-launcher` reads `uses.json` from the port folder, not only from the `.hmod`.** Without
+   `<port>/uses.json` it refuses the build with *"the package was made by an older tool and doesn't
+   say what it uses"* and builds without the mod (launcher 0.2.92). The file is generated inside the
+   package by `cargo horizon-mod build`; the port keeps the extracted copy beside the manifest, and
+   it must be re-extracted whenever the sources change.
+2. **A launcher build picks the instance's Horizon unless told otherwise.** After the pin moved, a
+   plain `native-build` still built a `native-0b14f8a-…` version; `--update` (or an instance that
+   plays the new Nightly) is what moves the build to `0a875da`.
+3. **`build-slot.sh` forwards `fmt` to the far box**, where there is no `cargo-horizon-mod` and where
+   a formatting edit would land on a synced copy; `BUILD_LOCAL=1` is what formats this tree. The
+   package build also needs `BUILD_LOCAL=1` (the far box has no `cargo-horizon-mod`).
+4. **A wire's decay is `15 - (distance - 2)`** over a line whose block is `distance` blocks from the
+   face: block at 12 → wire at the face is 5, at 14 → 3 (the first attempt was one off and the OR
+   analog phase read 6).
+5. **The rig's air fill has to cover the analog lines.** The north line reaches z=-14; a rig filled
+   only to z=-6 leaves End stone in place and `setblock` silently does not place the wire (the run
+   said "the analog wire at 0,64,-7 did not place", which is the check that caught it).
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices,rust-port

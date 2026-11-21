@@ -1,14 +1,17 @@
 id = "little_big_redstone"
 name = "Little Big Redstone"
-version = "0.2.0"
+version = "0.2.2"
 description = """A port of Little Big Redstone for Horizon: the red microchip is a block that holds a small
 redstone circuit and drives the redstone on its six faces. This slice carries the chip, its circuit
 board item, the I/O ports (an input compares the signal on its face with at least / exactly / at
-most and passes it, an output emits the configured strength weakly or strongly) and the AND gate
-(2..10 inputs, on when every input is on, passing the greatest). The circuit lives in the block
+most and passes it, an output emits the configured strength weakly or strongly) and all six logic
+gates: AND and NAND (2..10 inputs), OR and XOR (2..10, analog — the greatest input, XOR only when an
+odd number are on), NOR (2..10, boolean) and NOT (one input). The circuit lives in the block
 entity's saved compound and is evaluated at the end of each level tick, so it survives a save and a
-reload. /lbr circuit <x> <y> <z> and|status|clear is the configuration surface. The other 15
-microchip colours, the other logic components, the circuit-board GUI, the custom model loader and
+reload. /lbr circuit <x> <y> <z> <gate> <input...> <output>, ... output <face> <strength>
+<weak|strong>, ... status and ... clear are the configuration surface. The other 15 microchip
+colours, the other 14 logic components (latch, sequencer, selector, randomizer, comparator,
+calculator, reader, battery, tag, debugger, …), the circuit-board GUI, the custom model loader and
 the logic-array items are not ported yet."""
 authors = ["Swedz", "AdLf0208"]
 # The original's licence: MIT (Swedz/Little-Big-Redstone); its text and copyright notice travel
@@ -25,5 +28,5 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

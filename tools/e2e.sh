@@ -24,7 +24,15 @@
 #      (duplicate face, unknown face, no microchip there, unknown action);
 #   8. counterfactual: stone in the microchip's cell, both inputs powered ->
 #      lamp dark;
-#   9. the content half: all 64 microchip states bind, the item is
+#   9. the six gates (0.2.2): NOT, OR, XOR, NAND and NOR on the jar's own truth
+#      tables. The lamp shows ON/OFF; a **redstone wire** where the lamp stands
+#      and a **pass-through output port** (`/lbr ... output east 0 weak`) show
+#      the exact strength, so OR and XOR prove their analog "greatest input"
+#      rule and NOT/NAND/NOR prove they emit 1, not 15;
+#  10. XOR's four-input scene: an odd number of inputs on is ON, an even number
+#      OFF (1, 2, 3 and 4 inputs);
+#  11. `/lbr ... status` names each gate and its input count;
+#  12. the content half: all 64 microchip states bind, the item is
 #      `/give`-able, the block drops itself to a diamond pickaxe, the jar's own
 #      shaped recipe crafts from the circuit board and the `c:` tags
 #      (`tools/craft_check.py`), and a stick in the circuit board's place
@@ -32,6 +40,8 @@
 #
 # SELFTEST=1 keeps the rig but asserts the unpowered lamp is LIT, so the run
 # must fail: the counterfactual proving the lamp checks can fail.
+# SELFTEST=gates keeps the rig but asserts NOT's ON output is dark, so the run
+# must fail: the counterfactual proving the gate assertions can fail.
 #
 # Since 0.2.0 the port is one flat SDK `.hmod`: the code is compiled into the game
 # by the launcher and `assets/`/`data/` are loaded from the same package, so the
@@ -150,6 +160,75 @@ chip_power() {
         | jq -r '.chat // [] | join(" ")'
 }
 
+# The strength the microchip emits on its east face (the output port), read from
+# the saved compound: `data get ... microchip.power[5]` replies with the number.
+chip_face_power() {
+    ctl command "execute in minecraft:the_end run data get block 0 64 0 microchip.power[5]" \
+        | jq -r '.chat // [] | join(" ")'
+}
+expect_face_power() { # strength
+    local got i
+    for i in 1 2 3; do
+        got=$(chip_face_power)
+        case " $got " in
+            *" $1 "*) echo "microchip east face power: $got"; return 0 ;;
+        esac
+        ctl wait 4
+    done
+    fail "expected the microchip's east face to emit $1, got '$got'"
+}
+
+# The redstone wire standing where the lamp was: with the output port passing its
+# input through (strength 0) the wire carries the gate's own value.
+expect_wire() { # strength
+    local state i
+    for i in 1 2 3 4; do
+        state=$(block_props 1 64 0)
+        case "$state" in
+            *",power=$1,"*) echo "output wire 1,64,0: $state"; return 0 ;;
+        esac
+        ctl wait 4
+    done
+    fail "expected the output wire at 1,64,0 to carry power=$1, got '$(block_state 1 64 0)'"
+}
+
+# A decaying line along z: a redstone block `distance` blocks from the chip's
+# face with wires between, so the wire at the face carries 15 - (distance - 2)
+# (12 -> 5, 14 -> 3). Every placement is read back.
+analog_line() { # distance sign (+1 south, -1 north)
+    local d=$1 sign=$2 i
+    for i in $(seq 1 $((d - 1))); do
+        setblock "0 64 $((sign * i)) minecraft:redstone_wire"
+        ctl wait 1
+        case "$(block_state 0 64 $((sign * i)))" in
+            *redstone_wire*) ;;
+            *) fail "the analog wire at 0,64,$((sign * i)) did not place" ;;
+        esac
+    done
+    setblock "0 64 $((sign * d)) minecraft:redstone_block"
+}
+analog_clear() {
+    local i
+    for i in $(seq 1 14); do
+        setblock "0 64 $i minecraft:air"
+        setblock "0 64 -$i minecraft:air"
+    done
+}
+
+# A reply the port just sent: matched only in the newest few chat lines, so an
+# older message that happens to contain the same words cannot satisfy it.
+expect_recent() { # substring
+    local all i
+    for i in 1 2 3 4; do
+        all=$(ctl messages 6 | jq -r '.chat[]' 2>/dev/null || true)
+        case "$all" in
+            *"$1"*) echo "reply: $1"; return 0 ;;
+        esac
+        ctl wait 4
+    done
+    fail "no recent reply containing '$1'; newest lines: $(printf '%s' "$all" | tail -3 | tr '\n' '|')"
+}
+
 cleanup() {
     local status=$?
     ctl quit >/dev/null 2>&1 || true
@@ -189,8 +268,10 @@ go_home() {
 # microchip (never inside it, and out of the wire line's way).
 build_rig() {
     go_home
-    ctl command "execute in minecraft:the_end run fill -6 63 -6 16 63 16 minecraft:stone" >/dev/null
-    ctl command "execute in minecraft:the_end run fill -6 64 -6 16 70 16 minecraft:air" >/dev/null
+    # The floor and the air cover the analog lines as well: the gate phases build
+    # a 13-block line north of the chip, so z=-14 is inside the rig.
+    ctl command "execute in minecraft:the_end run fill -14 63 -14 16 63 16 minecraft:stone" >/dev/null
+    ctl command "execute in minecraft:the_end run fill -14 64 -14 16 70 16 minecraft:air" >/dev/null
     ctl wait 10
     floor=$(block_name 0 63 1)
     [ "$floor" = "minecraft:stone" ] || fail "the rig floor did not fill at 0,63,1 (read '$floor')"
@@ -215,10 +296,17 @@ control_leg() {
         || fail "the control game has a microchip item, so the package is installed there"
     echo "  without the package: no microchip item, the cell stayed $name"
     ctl quit >/dev/null 2>&1 || true
+    # Let the control game leave the socket before the modded leg launches.
+    sleep 4
 }
 
 echo "== launch (The End, a launcher-built game carrying little_big_redstone.hmod) =="
-if [ -n "$CONTROL_GAME" ]; then control_leg; fi
+# The control is opt-in (CONTROL=1 with CONTROL_GAME): the launcher's `GAME=$CONTROL_GAME` leg
+# is the campaign's control, and launching both here left the first game's socket to the second.
+if [ "${CONTROL:-0}" = 1 ]; then
+    [ -n "$CONTROL_GAME" ] || fail "CONTROL=1 needs CONTROL_GAME (launcher-game.sh env <mod>)"
+    control_leg
+fi
 launch
 build_rig
 
@@ -320,11 +408,19 @@ say "lbr circuit 0 64 0 status"
 ctl wait 6
 expect_message "slot 2: AND gate with 2 inputs"
 
-echo "== status reports the ports; clear empties the microchip =="
+echo "== status reports the ports and writes nothing; clear empties the microchip =="
+# The finding: the status path evaluated *with* writes. Compare the chip's saved
+# data around the readout; `/data get` replies in the player's chat.
+chip_data() { ctl chat "/data get block 0 64 0" >/dev/null; ctl wait 3 >/dev/null; ctl messages 4 | jq -r '.chat[0]'; }
+data_before=$(chip_data)
 say "lbr circuit 0 64 0 status"
 ctl wait 6
 expect_message "I/O input on north"
 expect_message "I/O output on east"
+data_after=$(chip_data)
+[ "$data_before" = "$data_after" ] \
+    || fail "status changed the microchip: $data_before -> $data_after"
+echo "  status left the chip's saved data unchanged"
 say "lbr circuit 0 64 0 clear"
 ctl wait 6
 expect_message "cleared the microchip at 0 64 0"
@@ -342,13 +438,12 @@ expect_message "north is named twice"
 say "lbr circuit 0 64 0 and north south sideways"
 ctl wait 4
 expect_message "sideways is not a face"
-# `flip` is not a registered literal, so since 0.2.0 the game's **dispatcher** refuses it
-# before the hook runs (a typed command is parsed once by the game; there is no split line
-# left to parse). The assertion is the state, not the game's own text: the circuit is still
-# empty, so the refused verb built nothing.
+# `flip` is a word in the gate position and not a gate, so the port itself refuses it
+# (0.2.2 made the gate a word; 0.2.0 had fixed literals and the dispatcher refused it).
 say "lbr circuit 0 64 0 flip north south east"
 ctl wait 4
-echo "  unregistered verb refused before the hook; last reply: $(messages | tail -1)"
+expect_message "flip is not an action"
+echo "  an unknown gate word is refused by the port, and the circuit is still empty"
 say "lbr circuit 0 64 0 status"
 ctl wait 6
 expect_message "has no circuit"
@@ -382,6 +477,160 @@ say "lbr circuit 0 64 0 and north south east"
 ctl wait 6
 expect_lamp 1 64 0 true
 echo "restored: the microchip lights it again"
+
+echo "== the six gates: NOT, OR, XOR, NAND, NOR on the jar's truth tables =="
+# The lamp is replaced by a redstone wire and the output port is set to pass its
+# input through (strength 0), so every assertion below reads the gate's own value,
+# not the output port's fixed 15.
+setblock "0 64 1 minecraft:air"
+setblock "0 64 -1 minecraft:air"
+setblock "1 64 0 minecraft:redstone_wire"
+ctl wait 8
+
+echo "== NOT: 0 -> 1, 15 -> 0, and exactly 1 (boolean, never 15) =="
+say "lbr circuit 0 64 0 not north east"
+ctl wait 6
+expect_message "NOT gate at 0 64 0: input north, output east"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_message "the output port on east passes its input through (weak)"
+if [ "${SELFTEST:-0}" = gates ]; then
+    expect_wire 0   # the gate counterfactual: NOT's ON output is asserted dark (must FAIL)
+else
+    expect_wire 1
+fi
+expect_face_power 1
+setblock "0 64 -1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 0
+setblock "0 64 -1 minecraft:air"
+ctl wait 6
+
+echo "== OR: 0,0 dark, 0,1 / 1,0 / 1,1 on, and the greatest input =="
+say "lbr circuit 0 64 0 or north south east"
+ctl wait 6
+expect_message "OR gate at 0 64 0: inputs north and south, output east"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_wire 0
+setblock "0 64 1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 15
+setblock "0 64 -1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 15
+setblock "0 64 1 minecraft:air"
+ctl wait 6
+expect_wire 15
+setblock "0 64 -1 minecraft:air"
+ctl wait 4
+# analog: north = 3, south = 5 -> OR yields 5 (an OR that only said ON would
+# have to pass its input, so this is the guide's "greatest input" rule)
+analog_line 12 1
+analog_line 14 -1
+ctl wait 8
+expect_wire 5
+expect_face_power 5
+
+echo "== XOR: 0,0 / 1,1 dark, 0,1 / 1,0 on =="
+analog_clear
+ctl wait 8
+say "lbr circuit 0 64 0 xor north south east"
+ctl wait 6
+expect_message "XOR gate at 0 64 0"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_wire 0
+setblock "0 64 1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 15
+setblock "0 64 1 minecraft:air"
+setblock "0 64 -1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 15
+setblock "0 64 1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 0
+
+echo "== XOR's four-input scene: an odd number on is on, an even number off =="
+say "lbr circuit 0 64 0 xor north south west up east"
+ctl wait 6
+expect_recent "XOR gate at 0 64 0: inputs north, south, west and up, output east"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_wire 0                 # north + south on: two, even
+setblock "-1 64 0 minecraft:redstone_block"
+setblock "0 65 0 minecraft:redstone_block"
+ctl wait 8
+expect_wire 0                 # four inputs on: even
+setblock "0 65 0 minecraft:air"   # up off -> three on: odd
+ctl wait 8
+expect_wire 15
+setblock "-1 64 0 minecraft:air"  # west off -> two on: even
+ctl wait 8
+expect_wire 0
+setblock "0 64 1 minecraft:air"   # south off -> one on: odd
+ctl wait 8
+expect_wire 15
+analog_clear
+ctl wait 6
+
+echo "== NAND and NOR are boolean: they emit 1, not 15 =="
+say "lbr circuit 0 64 0 nand north south east"
+ctl wait 6
+expect_recent "NAND gate at 0 64 0"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_wire 1                 # 0,0 -> NAND on, and exactly 1
+setblock "0 64 -1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 1                 # 15,0 -> NAND on, still exactly 1 (not 15)
+setblock "0 64 1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 0                 # 15,15 -> NAND off
+setblock "0 64 1 minecraft:air"
+setblock "0 64 -1 minecraft:air"
+ctl wait 6
+say "lbr circuit 0 64 0 nor north south east"
+ctl wait 6
+expect_recent "NOR gate at 0 64 0"
+say "lbr circuit 0 64 0 output east 0 weak"
+ctl wait 6
+expect_wire 1                 # 0,0 -> NOR on, exactly 1
+setblock "0 64 1 minecraft:redstone_block"
+ctl wait 6
+expect_wire 0                 # any input on -> NOR off
+setblock "0 64 1 minecraft:air"
+ctl wait 6
+
+echo "== status names each gate; a wrong shape is refused and changes nothing =="
+say "lbr circuit 0 64 0 or north south east"
+ctl wait 6
+say "lbr circuit 0 64 0 status"
+ctl wait 6
+expect_message "slot 2: OR gate with 2 inputs"
+say "lbr circuit 0 64 0 not north south east"
+ctl wait 4
+expect_message "a not gate takes exactly 1 input, not 2"
+say "lbr circuit 0 64 0 and north"
+ctl wait 4
+expect_message "wrong number of arguments"
+say "lbr circuit 0 64 0 and north south"
+ctl wait 4
+expect_message "an and gate takes 2 to 10 inputs, not 1"
+say "lbr circuit 0 64 0 or north north east"
+ctl wait 4
+expect_message "north is named twice"
+say "lbr circuit 0 64 0 output east 16 weak"
+ctl wait 4
+expect_message "16 is not a signal strength (0 to 15)"
+say "lbr circuit 0 64 0 output west 0 weak"
+ctl wait 4
+expect_message "there is no output port on west"
+say "lbr circuit 0 64 0 status"
+ctl wait 6
+expect_message "slot 2: OR gate with 2 inputs"
+echo "  every refusal left the OR circuit in place"
 
 echo "== the content half: 64 states, the item, the drop, the recipe =="
 # The state loop writes every face combination, so nothing may rewrite the face
@@ -458,4 +707,4 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 2
 
-echo "PASS: truth table 0,0 / 0,1 / 1,0 dark and 1,1 lit, A removed with B on dark (not a latch), A=15 with B=5 lights it and the saved power is 15, face properties track the ports, the circuit and its state survive a relaunch, status reports the AND gate and its ports, clear empties it, every wrong command is refused and changes nothing, stone in the cell stays dark, 64 microchip states bind, the item is giveable, the block drops itself, and the jar's shaped recipe crafts from the circuit board and the c: tags while a stick crafts nothing"
+echo "PASS: AND truth table 0,0 / 0,1 / 1,0 dark and 1,1 lit, A removed with B on dark (not a latch), A=15 with B=5 lights it and the saved power is 15, face properties track the ports, the circuit and its state survive a relaunch, status reports the AND gate and its ports, clear empties it, every wrong command is refused and changes nothing, stone in the cell stays dark, the six gates match the jar's truth tables through a pass-through output (NOT 0->1 and 15->0 as exactly 1, OR and XOR analog greatest, XOR's four-input odd/even parity, NAND and NOR boolean 1), status names each gate and a wrong shape is refused without changing the circuit, 64 microchip states bind, the item is giveable, the block drops itself, and the jar's shaped recipe crafts from the circuit board and the c: tags while a stick crafts nothing"

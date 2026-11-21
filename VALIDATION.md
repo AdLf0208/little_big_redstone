@@ -1,6 +1,38 @@
-# Validation — Little Big Redstone slice 1
+# Validation — Little Big Redstone
 
-## 0.2.0 (SDK format, 2026-11-18) — current
+## 0.2.2 (pin `0a875da`, 2026-11-21) — current
+
+The gate family slice: OR, XOR, NAND, NOR and NOT beside the 0.2.1 AND gate, the gate word and the
+output-port retarget on `/lbr`, and their in-game truth tables. SDK Nightly
+**`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (2026-11-20), mixins
+**`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, game 26.3. Logs:
+`ports/_shared/evidence/little_big_redstone/sdk-*.log` and
+`ports/_shared/evidence/little_big_redstone-e2e/e2e-*.log`; the red→green record, the coverage
+table and the traps are in `notes.md` → *Slice 2*.
+
+| Step | Result |
+|---|---|
+| red first (five gate rules stubbed) | **8 failed / 42 passed**, `not yet implemented: the or gate's output rule` |
+| `cargo test --offline` | **50 passed**, 0 failed |
+| `cargo clippy --all-targets -- -D warnings` | exit 0, **0 warnings** |
+| `cargo fmt --check` | clean |
+| `rm -f Cargo.lock && cargo horizon-mod build` (twice) | **57,072 B**, sha256 `481bec309448c22afc34196d1d32c87828545437d6577c7d78787f0cdb4c8cb8`, `cmp`-identical |
+| `cargo horizon-mod check` | `little_big_redstone 0.2.2 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, **exit 0** |
+| `fits --build 0a875da` | `0a875da  made for`, exit 0 |
+| `fits --build 0b14f8a` (the different build) | `0b14f8a  fits`, exit 0 |
+| `unzip -l` | **37 entries**, no `Cargo.lock`, `uses.json` inside, `LICENSE` + `LICENSE-NOTICE.md` inside |
+| tree vs package | `horizon-mod.toml`, `Cargo.toml`, `src/{lib,runtime,support}.rs` and `uses.json` byte-identical |
+| `verify-sdk-package.py little_big_redstone` | **1/1** |
+| in-game | `PASS` + `EXIT:0`; `SELFTEST=1` `FAIL` + `EXIT:1`; `SELFTEST=gates` `FAIL` + `EXIT:1`; control (`GAME=$CONTROL_GAME`) `FAIL` + `EXIT:1` |
+| `check-e2e-logs.py little_big_redstone-e2e --strict` | exit 0, **6/6 ok** |
+
+What the 0.2.2 in-game leg adds to 0.2.1's (full list in `notes.md` → *What the in-game leg proves*):
+a redstone wire at the output face and a pass-through output port, so NOT reads `power=1` (and the
+saved `microchip.power[5]` = 1), OR reads 5 for inputs 3 and 5, XOR reads 0/15/15/0 and, with four
+inputs, 0/0/15/0/15 by parity, NAND and NOR read exactly 1, `status` names each gate, and every wrong
+gate shape is refused without touching the circuit.
+
+## 0.2.0 (SDK format, 2026-11-18) — the AND slice on `0b14f8a`
 
 SDK nightly **`0b14f8acfd97fa2c750e42795249dcc981178ca4`**, mixins
 **`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`**, game 26.3, one flat
@@ -27,7 +59,7 @@ map, the hook table and the new traps are in `notes.md`
 | `uses.json` | 304 entries (12 hook names / 19 event fields, the `block` and `block_entity` parts attached, `capabilities = ["registries"]`) |
 | in-game e2e | **not run**: `horizon-launcher` is not installed here, so no 0.2.0 game carrying the package exists. `tools/e2e.sh` is updated for it (`GAME=` required, `CONTROL_GAME=` optional, `SELFTEST=1`) |
 
-## 0.1.0 (retired `.hnmod` format — historical record)
+## 0.1.0 (retired `.hnmod` format, 2026-11-12 — historical record)
 
 Everything below this heading describes the retired container (`.hnmod`,
 `mixins/`, `content/`, `tools/horizon.py`). It is kept as the behaviour's
